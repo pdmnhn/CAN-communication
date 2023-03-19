@@ -1,5 +1,6 @@
 #include <iostream>
 #include <string>
+#include <tuple>
 #include "pico/stdlib.h"
 #include "mcp2515.h"
 #include "pico-ssd1306/ssd1306.h"
@@ -12,7 +13,44 @@ using namespace pico_ssd1306;
 const uint I2C_SDA = 2;
 const uint I2C_SCL = 3;
 const uint LED = 25;
-const unsigned char MAC[8] = {0xFF, 0xDD, 0xCC, 0xBB, 0x00, 0x11, 0x22, 0x33};
+const uint16_t I2C_DISPLAY_ADDRESS = 0x3C;
+
+enum LeiACommand : uint8_t
+{
+    DATA = 0b00,
+    MAC_OF_DATA = 0b01,
+    EPOCH = 0b10,
+    MAC_OF_EPOCH = 0b11
+};
+const uint16_t LEIA_COUNTER_MAX_VALUE = 0xFFFF;
+const static uint8_t MAC_LENGTH = 8;
+const unsigned char STATIC_MAC[MAC_LENGTH] = {0xFF, 0xDD, 0xCC, 0xBB, 0x00, 0x11, 0x22, 0x33};
+
+uint32_t getExtendedCanID(uint16_t canID, uint16_t counter, LeiACommand command)
+{
+    /*
+    canID -> 11 bit CAN identifier
+    counter -> 16 bit counter for LeiA
+    command -> 2 bit command for LeiA
+    Returns 32 bit uint with 29 bit extended CAN ID to be used with the MCP-2515 Library
+    ORed with the CAN_EFF_FLAG flag
+    */
+    uint32_t exCanID = (canID << 18) | (command << 16) | counter | CAN_EFF_FLAG;
+    return exCanID;
+}
+
+tuple<uint16_t, uint16_t, LeiACommand> splitExtendedCanID(uint32_t exCanID)
+{
+    /*
+    exCanID -> 29 bit extended CAN identifier taken in 32 bit long unsigned integer
+    Returns {11 bit CAN identifier, 16 bit counter for LeiA, 2 bit command for LeiA}
+    */
+    uint16_t canID = exCanID >> 18;
+    uint16_t counter = exCanID & 0xFFFF;
+    LeiACommand command = LeiACommand((exCanID >> 16) & 0b11);
+
+    return {canID, counter, command};
+}
 
 int main()
 {
@@ -31,12 +69,8 @@ int main()
 
     i2c_init(i2c1, 1000000);
 
-    SSD1306 display(i2c1, 0x3C, Size::W128xH64);
+    SSD1306 display(i2c1, I2C_DISPLAY_ADDRESS, Size::W128xH64);
     display.setOrientation(0);
-
-    // drawText(&display, font_8x8, "Temperature:", 0, 0);
-    // drawText(&display, font_8x8, "Waiting...", 0, 16);
-    // display.sendBuffer();
 
     MCP2515 canInterface;
     can_frame dataFrame, macFrame;
@@ -47,78 +81,60 @@ int main()
 
     while (true)
     {
-        // drawText(&display, font_8x8, "Inside while loop", 0, 8);
-        // display.sendBuffer();
-
-        if (canInterface.readMessage(&dataFrame) == MCP2515::ERROR_OK && ((dataFrame.can_id >> 17) & 0b11) == 0b00)
+        if (canInterface.readMessage(&dataFrame) == MCP2515::ERROR_OK)
         {
-            display.clear();
-            drawText(&display, font_8x8, "Data Frame", 0, 8);
-            display.sendBuffer();
-            sleep_ms(200);
-            if (canInterface.readMessage(&macFrame) == MCP2515::ERROR_OK && ((macFrame.can_id >> 17) & 0b11) == 0b01)
+            auto [dataFrameCanID, dataFrameCounter, dataFrameCommand] = splitExtendedCanID(dataFrame.can_id);
+            if (dataFrameCommand == LeiACommand::DATA)
             {
-                drawText(&display, font_8x8, "MAC Frame", 0, 16);
+                display.clear();
+                drawText(&display, font_8x8, "RXd Data Frame", 0, 8);
                 display.sendBuffer();
-                uint16_t dataId = dataFrame.can_id >> 21;
-                uint16_t dataFrameCounter = dataFrame.can_id >> 1, macFrameCounter = macFrame.can_id >> 1;
 
-                if (dataFrameCounter == macFrameCounter)
+                sleep_ms(200); // to ensure the MAC frame is sent before reading
+
+                if (canInterface.readMessage(&macFrame) == MCP2515::ERROR_OK)
                 {
-                    cout << "Received both data and mac frame for the same counter value" << endl;
-                    int payloadLength = dataFrame.can_dlc;
-                    cout << "DLC: " << payloadLength << endl;
-                    // int temperature = dataFrame.data[0];
-                    int temperature = 91;
-                    // cout << "dataframe: ";
-                    // for (int i = 0; i < 8; i++)
-                    // {
-                    //     cout << dataFrame.data[i] << ", ";
-                    // }
-                    cout << "Temperature: " << temperature << endl;
-                    cout << "Counter: " << dataFrameCounter << endl;
+                    cout << "RXd MAC Frame" << endl;
+                    auto [macFrameCanID, macFrameCounter, macFrameCommand] = splitExtendedCanID(macFrame.can_id);
 
-                    drawText(&display, font_8x8, to_string(temperature).data(), 0, 24);
-                    display.sendBuffer();
-                    drawText(&display, font_8x8, to_string(dataFrameCounter).data(), 0, 32);
-                    display.sendBuffer();
-                    bool macMatch = true;
-                    for (int i = 0; i < 8; i++)
+                    if (macFrameCommand == LeiACommand::MAC_OF_DATA &&
+                        macFrameCanID == dataFrameCanID &&
+                        macFrameCounter == dataFrameCounter)
                     {
-                        // cout << "inside: ";
-                        // cout << macFrame.data[i] << ", ";
-                        if (MAC[i] != macFrame.data[i])
-                        {
-                            // cout << "MAC failed: " << i << endl;
-                            macMatch = false;
-                            break;
-                        }
-                    }
+                        drawText(&display, font_8x8, "RXd MAC Frame", 0, 16);
+                        display.sendBuffer();
+                        uint8_t temperature = dataFrame.data[0];
 
-                    drawText(&display, font_8x8, "Authenticated", 0, 48);
-                    // if (macMatch)
-                    // {
-                    // }
-                    // else
-                    // {
-                    //     drawText(&display, font_8x8, "Failed", 0, 48);
-                    // }
-                    display.sendBuffer();
+                        cout << "Temperature: " << (int)temperature << endl;
+                        cout << "Counter: " << dataFrameCounter << endl;
+
+                        drawText(&display, font_8x8, ("Temp: " + to_string(temperature)).data(), 0, 24);
+                        drawText(&display, font_8x8, ("Counter: " + to_string(dataFrameCounter)).data(), 0, 32);
+                        display.sendBuffer();
+
+                        bool macMatch = true;
+
+                        for (uint8_t i = 0; i < MAC_LENGTH; i++)
+                        {
+                            if (macFrame.data[i] != STATIC_MAC[i])
+                            {
+                                macMatch = false;
+                                break;
+                            }
+                        }
+
+                        if (macMatch)
+                        {
+                            drawText(&display, font_8x8, "Authenticated", 0, 48);
+                        }
+                        else
+                        {
+                            drawText(&display, font_8x8, "Failed", 0, 48);
+                        }
+                        display.sendBuffer();
+                    }
                 }
             }
-            // drawText(&display, font_8x8, "Received...", 0, 16);
-            // display.sendBuffer();
-            // }
-            // cout << "ID: " << frame.can_id << "\n"
-            //      << "DLC: " << frame.can_dlc << "\n"
-            //      << "Temperature: " << temperature << "\n\n";
-            // int dlc = frame.can_dlc;
-
-            // cout << dlc << endl;
-
-            // string canId = to_string(dataFrame.can_id);
-            // string canDLC = to_string(dataFrame.can_dlc);
-            // display.clear();
         }
     }
 
