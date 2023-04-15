@@ -1,43 +1,25 @@
 #include <iostream>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include "pico/stdlib.h"
 #include "mcp2515.h"
+#include "LeiA/leia.h"
 #include "pico-ssd1306/ssd1306.h"
 #include "pico-ssd1306/textRenderer/TextRenderer.h"
 #include "hardware/i2c.h"
 
 using namespace std;
 using namespace pico_ssd1306;
+using namespace leia;
 
 const uint I2C_SDA = 2;
 const uint I2C_SCL = 3;
 const uint LED = 25;
 const uint16_t I2C_DISPLAY_ADDRESS = 0x3C;
 
-enum LeiACommand : uint8_t
-{
-    DATA = 0b00,
-    MAC_OF_DATA = 0b01,
-    EPOCH = 0b10,
-    MAC_OF_EPOCH = 0b11
-};
-const uint16_t LEIA_COUNTER_MAX_VALUE = 0xFFFF;
 const static uint8_t MAC_LENGTH = 8;
 const unsigned char STATIC_MAC[MAC_LENGTH] = {0xFF, 0xDD, 0xCC, 0xBB, 0x00, 0x11, 0x22, 0x33};
-
-uint32_t getExtendedCanID(uint16_t canID, uint16_t counter, LeiACommand command)
-{
-    /*
-    canID -> 11 bit CAN identifier
-    counter -> 16 bit counter for LeiA
-    command -> 2 bit command for LeiA
-    Returns 32 bit uint with 29 bit extended CAN ID to be used with the MCP-2515 Library
-    ORed with the CAN_EFF_FLAG flag
-    */
-    uint32_t exCanID = (canID << 18) | (command << 16) | counter | CAN_EFF_FLAG;
-    return exCanID;
-}
 
 tuple<uint16_t, uint16_t, LeiACommand> splitExtendedCanID(uint32_t exCanID)
 {
@@ -51,6 +33,17 @@ tuple<uint16_t, uint16_t, LeiACommand> splitExtendedCanID(uint32_t exCanID)
 
     return {canID, counter, command};
 }
+
+uint8_t
+    LONG_TERM_KEY1[BYTES] = {0x33, 0x74, 0x36, 0x77, 0x39, 0x7A, 0x24, 0x43, 0x26, 0x46, 0x29, 0x4A, 0x40, 0x4E, 0x63, 0x52},
+    LONG_TERM_KEY2[BYTES] = {0x4A, 0x40, 0x4E, 0x63, 0x52, 0x66, 0x55, 0x6A, 0x58, 0x6E, 0x32, 0x72, 0x35, 0x75, 0x38, 0x78};
+
+unordered_map<uint16_t, LeiAState *>
+    canIdToLeiA = {
+        {0b11001100111, new LeiAState(LONG_TERM_KEY1)},
+        {0b10101010111, new LeiAState(LONG_TERM_KEY1)}};
+
+uint8_t dataHolder1[BYTES] = {0}, dataHolder2[BYTES] = {0};
 
 int main()
 {
@@ -112,18 +105,14 @@ int main()
                         drawText(&display, font_8x8, ("Counter: " + to_string(dataFrameCounter)).data(), 0, 32);
                         display.sendBuffer();
 
-                        bool macMatch = true;
+                        memcpy(dataHolder1, dataFrame.data, 8);
+                        memcpy(dataHolder1 + 8, dataFrame.data, 8);
 
-                        for (uint8_t i = 0; i < MAC_LENGTH; i++)
-                        {
-                            if (macFrame.data[i] != STATIC_MAC[i])
-                            {
-                                macMatch = false;
-                                break;
-                            }
-                        }
+                        memcpy(dataHolder2, macFrame.data, 8);
+                        memcpy(dataHolder2 + 8, macFrame.data, 8);
 
-                        if (macMatch)
+                        if (canIdToLeiA.count(dataFrameCanID) and
+                            canIdToLeiA[dataFrameCanID]->authenticate(dataHolder1, dataHolder2))
                         {
                             drawText(&display, font_8x8, "Authenticated", 0, 48);
                         }
