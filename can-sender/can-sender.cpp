@@ -1,11 +1,14 @@
 #include <iostream>
 #include <stdint.h>
+#include "unordered_map"
 #include "pico/stdlib.h"
 #include "pico/time.h"
 #include "hardware/adc.h"
 #include "mcp2515.h"
+#include "LeiA/leia.h"
 
 using namespace std;
+using namespace leia;
 
 const uint ADC_CHN = 4;
 const uint ADC_PIN = ADC_CHN + 26;
@@ -14,35 +17,23 @@ const uint LED = 25;
 const double ADC_VREF = 3.3;
 const double ADC_CONVERSION_FACTOR = ADC_VREF / (ADC_RANGE - 1);
 
-enum LeiACommand : uint8_t
-{
-    DATA = 0b00,
-    MAC_OF_DATA = 0b01,
-    EPOCH = 0b10,
-    MAC_OF_EPOCH = 0b11
-};
-const uint16_t LEIA_COUNTER_MAX_VALUE = 0xFFFF;
 const static uint8_t MAC_LENGTH = 8;
-const unsigned char STATIC_MAC[MAC_LENGTH] = {0xFF, 0xDD, 0xCC, 0xBB, 0x00, 0x11, 0x22, 0x33};
+uint8_t dataHolder1[BYTES] = {0};
 
-uint32_t getExtendedCanID(uint16_t canID, uint16_t counter, LeiACommand command)
-{
-    /*
-    canID -> 11 bit CAN identifier
-    counter -> 16 bit counter for LeiA
-    command -> 2 bit command for LeiA
-    Returns 32 bit uint with 29 bit extended CAN ID to be used with the MCP-2515 Library
-    ORed with the CAN_EFF_FLAG flag
-    */
-    uint32_t exCanID = (canID << 18) | (command << 16) | counter | CAN_EFF_FLAG;
-    return exCanID;
-}
+uint8_t
+    LONG_TERM_KEY1[BYTES] = {0x33, 0x74, 0x36, 0x77, 0x39, 0x7A, 0x24, 0x43, 0x26, 0x46, 0x29, 0x4A, 0x40, 0x4E, 0x63, 0x52},
+    LONG_TERM_KEY2[BYTES] = {0x4A, 0x40, 0x4E, 0x63, 0x52, 0x66, 0x55, 0x6A, 0x58, 0x6E, 0x32, 0x72, 0x35, 0x75, 0x38, 0x78};
+
+unordered_map<uint16_t, LeiAState *>
+    canIdToLeiA = {
+        {0b11001100111, new LeiAState(LONG_TERM_KEY1)},
+        {0b10101010111, new LeiAState(LONG_TERM_KEY1)}};
 
 int main()
 {
     stdio_init_all();
-    const uint16_t temperatureId = 0b01001100110;
-    uint16_t counter = 0;
+    const uint16_t temperatureId = 0b11001100111;
+    LeiAState *leiastate = canIdToLeiA[temperatureId];
 
     MCP2515 canInterface;
     can_frame frame;
@@ -65,8 +56,8 @@ int main()
     {
         reading = adc_read() * ADC_CONVERSION_FACTOR;
         temperature = 27 - (reading - 0.706) / 0.001721;
-
-        frame.can_id = getExtendedCanID(temperatureId, counter, LeiACommand::DATA);
+        const uint16_t currentCounter = leiastate->getCounter();
+        frame.can_id = getExtendedCanID(temperatureId, currentCounter, LeiACommand::DATA);
         frame.can_dlc = 1;
         frame.data[0] = temperature;
 
@@ -74,21 +65,24 @@ int main()
 
         if (canInterface.sendMessage(&frame) == MCP2515::ERROR_OK)
         {
-            frame.can_id = getExtendedCanID(temperatureId, counter, LeiACommand::MAC_OF_DATA);
+            frame.can_id = getExtendedCanID(temperatureId, currentCounter, LeiACommand::MAC_OF_DATA);
+
+            dataHolder1[0] = dataHolder1[8] = frame.data[0];
+            vector<uint8_t> macOfData = leiastate->generateMAC(dataHolder1);
             for (uint8_t i = 0; i < MAC_LENGTH; i++)
             {
-                frame.data[i] = STATIC_MAC[i];
+                frame.data[i] = macOfData[i];
             }
+
             frame.can_dlc = MAC_LENGTH;
             if (canInterface.sendMessage(&frame) == MCP2515::ERROR_OK)
             {
-                cout << "Success: " << counter << endl;
+                cout << "Success: " << currentCounter << endl;
                 gpio_put(LED, 1);
                 sleep_ms(2500);
                 gpio_put(LED, 0);
             }
         }
-        counter = (counter + 1) % LEIA_COUNTER_MAX_VALUE;
         sleep_ms(2500);
     }
 

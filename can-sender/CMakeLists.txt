@@ -24,7 +24,6 @@ project(can-sender C CXX ASM)
 pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
-
 add_executable(can-sender mcp2515.cpp can-sender.cpp)
 
 pico_set_program_name(can-sender "can-sender")
