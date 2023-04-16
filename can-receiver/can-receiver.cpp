@@ -127,53 +127,73 @@ int main()
                         display.sendBuffer();
                     }
 
-                    /*
-                                        if (shouldResync)
-                                        {
-                                            cout << "-------------------------------" << endl;
-                                            cout << "Init Resync" << endl;
-                                            aecFrame.can_id = dataFrameCanID + 0b10u;
-                                            uint64_t data = dataFrameCanID << 53u | (leiastate->getEpoch() & (~(0b11111111111 << 53u)));
-                                            aecFrame.can_dlc = 8u;
-                                            for (size_t i = 7; i >= 0u; i--)
-                                            {
-                                                aecFrame.data[i] = data & 0xFF;
-                                                data >>= 0xFF;
-                                            }
-                                            if (canInterface.sendMessage(&aecFrame) == MCP2515::ERROR_OK)
-                                            {
-                                                while (canInterface.readMessage(&aecFrame) != MCP2515::ERROR_OK)
-                                                    ; // Ensure the epoch is sent
+                    if (shouldResync)
+                    {
+                        cout << "-------------------------------" << endl;
+                        cout << "Init Resync" << endl;
+                        display.clear();
+                        drawText(&display, font_8x8, "Resync Started", 0, 8);
+                        display.sendBuffer();
+                        const uint16_t aecId = 0;
+                        aecFrame.can_id = aecId;
+                        uint64_t canIdMask = 0b11111111111;
+                        uint64_t data = (((uint64_t)dataFrameCanID) << 53u) | (leiastate->getEpoch() & (~(canIdMask << 53u)));
+                        aecFrame.can_dlc = 8u;
 
-                                                auto [senderAecId, senderCounter, senderCommand] = splitExtendedCanID(aecFrame.can_id);
-                                                if (senderAecId == (dataFrameCanID + 0b10u) and senderCommand == LeiACommand::EPOCH)
-                                                {
-                                                    uint64_t senderEpoch = 0u;
-                                                    for (size_t i = 7u; i >= 0u; i--)
-                                                    {
-                                                        senderEpoch = (senderEpoch << 8u) | aecFrame.data[i];
-                                                    }
+                        for (int i = 7; i >= 0; i--)
+                        {
+                            aecFrame.data[i] = (uint8_t)(data & (0xFF));
+                            data = data >> ((uint8_t)0xFF);
+                        }
 
-                                                    while (canInterface.readMessage(&aecFrame) != MCP2515::ERROR_OK)
-                                                        ; // Ensure the MAC of epoch is sent
+                        if (canInterface.sendMessage(&aecFrame) == MCP2515::ERROR_OK)
+                        {
+                            cout << "Sent AEC frame" << endl;
+                            drawText(&display, font_8x8, "Sent AUTH_FAIL", 0, 16);
+                            display.sendBuffer();
+                            while (true)
+                            {
+                                if (canInterface.readMessage(&aecFrame) == MCP2515::ERROR_OK)
+                                    break;
+                            }
 
-                                                    auto [macAecId, macAecCounter, macAecCommand] = splitExtendedCanID(aecFrame.can_id);
-                                                    if (macAecId == (dataFrameCanID + 0b10u) and macAecCommand == LeiACommand::MAC_OF_EPOCH)
-                                                    {
-                                                        if (leiastate->resyncOfReceiver(senderEpoch, senderCounter, aecFrame.data))
-                                                        {
-                                                            cout << "Resync Succeeded" << endl;
-                                                        }
-                                                        else
-                                                        {
-                                                            cout << "Resync Failed" << endl;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            cout << "-------------------------------" << endl;
-                                        }
-                                    */
+                            auto [senderAecId, senderCounter, senderCommand] = splitExtendedCanID(aecFrame.can_id);
+                            cout << "Sender Counter: " << (int)senderCounter << endl;
+                            if (senderAecId == aecId and senderCommand == LeiACommand::EPOCH)
+                            {
+                                uint64_t senderEpoch = 0u;
+                                for (int i = 7; i >= 0; i--)
+                                {
+                                    senderEpoch = (senderEpoch << 8u) | aecFrame.data[i];
+                                }
+                                cout << "Sender Epoch: " << senderEpoch << endl;
+
+                                while (true)
+                                {
+                                    if (canInterface.readMessage(&aecFrame) == MCP2515::ERROR_OK)
+                                        break;
+                                }
+
+                                auto [macAecId, macAecCounter, macAecCommand] = splitExtendedCanID(aecFrame.can_id);
+                                if (macAecId == aecId and macAecCommand == LeiACommand::MAC_OF_EPOCH)
+                                {
+                                    if (leiastate->resyncOfReceiver(senderEpoch, senderCounter, aecFrame.data))
+                                    {
+                                        cout << "Resync Succeeded" << endl;
+                                        drawText(&display, font_8x8, "Resync Succeeded", 0, 48);
+                                        display.sendBuffer();
+                                    }
+                                    else
+                                    {
+                                        cout << "Resync Failed" << endl;
+                                        drawText(&display, font_8x8, "Resync Failed", 0, 48);
+                                        display.sendBuffer();
+                                    }
+                                }
+                            }
+                        }
+                        cout << "-------------------------------" << endl;
+                    }
                 }
             }
         }
