@@ -35,7 +35,7 @@ int main()
     stdio_init_all();
     const uint16_t temperatureId = 0b11001100111;
     const uint16_t temperatureMACId = temperatureId + 0b1;
-    const uint16_t temperatureAECId = temperatureId + 0b10;
+    const uint16_t temperatureAECId = 0;
     LeiAState *leiastate = canIdToLeiA[temperatureId];
 
     MCP2515 canInterface;
@@ -57,11 +57,42 @@ int main()
 
     while (true)
     {
-        /*
+        reading = adc_read() * ADC_CONVERSION_FACTOR;
+        temperature = 27 - (reading - 0.706) / 0.001721;
+        const uint16_t currentCounter = leiastate->getCounter();
+        frame.can_id = getExtendedCanID(temperatureId, currentCounter, LeiACommand::DATA);
+        frame.can_dlc = 1;
+        frame.data[0] = temperature;
+
+        cout << "Temperature: " << (int)temperature << endl;
+        if (canInterface.sendMessage(&frame) == MCP2515::ERROR_OK)
+        {
+            frame.can_id = getExtendedCanID(temperatureMACId, currentCounter, LeiACommand::MAC_OF_DATA);
+
+            dataHolder1[0] = dataHolder1[8] = frame.data[0];
+            vector<uint8_t> macOfData = leiastate->generateMAC(dataHolder1);
+            for (uint8_t i = 0; i < MAC_LENGTH; i++)
+            {
+                frame.data[i] = macOfData[i];
+            }
+
+            frame.can_dlc = MAC_LENGTH;
+            if (canInterface.sendMessage(&frame) == MCP2515::ERROR_OK)
+            {
+                cout << "Success: " << currentCounter << endl;
+                gpio_put(LED, 1);
+                sleep_ms(2500);
+                gpio_put(LED, 0);
+            }
+        }
+
+        sleep_ms(200);
+
         if (canInterface.readMessage(&frame) == MCP2515::ERROR_OK and frame.can_id == temperatureAECId)
         {
+            cout << "Inside resync if block" << endl;
             uint64_t data = 0u;
-            const uint16_t canIdSelectionBits = 0b11111111111u;
+            const uint64_t canIdSelectionBits = 0b11111111111u;
             const uint64_t epochSelectionBits = ~(canIdSelectionBits << 53u);
             for (size_t i = 0u; i < 8u; i++)
             {
@@ -100,44 +131,6 @@ int main()
                         cout << "-------------------------------" << endl;
                     }
                 }
-            }
-        }
-*/
-        reading = adc_read() * ADC_CONVERSION_FACTOR;
-        temperature = 27 - (reading - 0.706) / 0.001721;
-        const uint16_t currentCounter = leiastate->getCounter();
-        frame.can_id = getExtendedCanID(temperatureId, currentCounter, LeiACommand::DATA);
-        frame.can_dlc = 1;
-        frame.data[0] = temperature;
-
-        cout << "Temperature: " << (int)temperature << endl;
-        if (canInterface.sendMessage(&frame) == MCP2515::ERROR_OK)
-        {
-            frame.can_id = getExtendedCanID(temperatureMACId, currentCounter, LeiACommand::MAC_OF_DATA);
-
-            dataHolder1[0] = dataHolder1[8] = frame.data[0];
-            vector<uint8_t> macOfData = leiastate->generateMAC(dataHolder1);
-            for (uint8_t i = 0; i < MAC_LENGTH; i++)
-            {
-                frame.data[i] = macOfData[i];
-            }
-
-            cout << "MAC"
-                 << "------------------------" << endl;
-            for (size_t i = 0; i < 16U; i++)
-            {
-                cout << (int)macOfData[i] << " -> ";
-            }
-            cout << endl
-                 << "----------------------------------" << endl;
-
-            frame.can_dlc = MAC_LENGTH;
-            if (canInterface.sendMessage(&frame) == MCP2515::ERROR_OK)
-            {
-                cout << "Success: " << currentCounter << endl;
-                gpio_put(LED, 1);
-                sleep_ms(2500);
-                gpio_put(LED, 0);
             }
         }
         sleep_ms(2500);
