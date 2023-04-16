@@ -27,6 +27,7 @@ tuple<uint16_t, uint16_t, LeiACommand> splitExtendedCanID(uint32_t exCanID)
     exCanID -> 29 bit extended CAN identifier taken in 32 bit long unsigned integer
     Returns {11 bit CAN identifier, 16 bit counter for LeiA, 2 bit command for LeiA}
     */
+    exCanID = exCanID & (~(1 << 31));
     uint16_t canID = exCanID >> 18;
     uint16_t counter = exCanID & 0xFFFF;
     LeiACommand command = LeiACommand((exCanID >> 16) & 0b11);
@@ -41,7 +42,7 @@ uint8_t
 unordered_map<uint16_t, LeiAState *>
     canIdToLeiA = {
         {0b11001100111, new LeiAState(LONG_TERM_KEY1)},
-        {0b10101010111, new LeiAState(LONG_TERM_KEY1)}};
+        {0b10101010111, new LeiAState(LONG_TERM_KEY2)}};
 
 uint8_t dataHolder1[BYTES] = {0}, dataHolder2[BYTES] = {0};
 
@@ -66,7 +67,7 @@ int main()
     display.setOrientation(0);
 
     MCP2515 canInterface;
-    can_frame dataFrame, macFrame;
+    can_frame dataFrame, macFrame, aecFrame;
 
     canInterface.reset();
     canInterface.setBitrate(CAN_1000KBPS, MCP_16MHZ);
@@ -76,52 +77,103 @@ int main()
     {
         if (canInterface.readMessage(&dataFrame) == MCP2515::ERROR_OK)
         {
-            auto [dataFrameCanID, dataFrameCounter, dataFrameCommand] = splitExtendedCanID(dataFrame.can_id);
+            const auto [dataFrameCanID, dataFrameCounter, dataFrameCommand] = splitExtendedCanID(dataFrame.can_id);
             if (dataFrameCommand == LeiACommand::DATA)
             {
                 display.clear();
                 drawText(&display, font_8x8, "RXd Data Frame", 0, 8);
                 display.sendBuffer();
 
-                sleep_ms(200); // to ensure the MAC frame is sent before reading
+                while (canInterface.readMessage(&macFrame) != MCP2515::ERROR_OK)
+                    ;
 
-                if (canInterface.readMessage(&macFrame) == MCP2515::ERROR_OK)
+                auto [macFrameCanID, macFrameCounter, macFrameCommand] = splitExtendedCanID(macFrame.can_id);
+
+                if (macFrameCommand == LeiACommand::MAC_OF_DATA &&
+                    macFrameCanID == (dataFrameCanID + 1u) &&
+                    macFrameCounter == dataFrameCounter)
                 {
-                    cout << "RXd MAC Frame" << endl;
-                    auto [macFrameCanID, macFrameCounter, macFrameCommand] = splitExtendedCanID(macFrame.can_id);
+                    drawText(&display, font_8x8, "RXd MAC Frame", 0, 16);
+                    display.sendBuffer();
+                    uint8_t temperature = dataFrame.data[0];
 
-                    if (macFrameCommand == LeiACommand::MAC_OF_DATA &&
-                        macFrameCanID == dataFrameCanID &&
-                        macFrameCounter == dataFrameCounter)
+                    cout << "Temperature: " << (int)temperature << endl;
+                    cout << "Counter: " << dataFrameCounter << endl;
+
+                    drawText(&display, font_8x8, ("Temp: " + to_string(temperature)).data(), 0, 24);
+                    drawText(&display, font_8x8, ("Counter: " + to_string(dataFrameCounter)).data(), 0, 32);
+                    display.sendBuffer();
+
+                    dataHolder1[0] = dataHolder1[8] = dataFrame.data[0];
+
+                    memcpy(dataHolder2, macFrame.data, 8);
+                    memcpy(dataHolder2 + 8, macFrame.data, 8);
+
+                    bool shouldResync = false;
+                    LeiAState *leiastate = canIdToLeiA.count(dataFrameCanID) ? canIdToLeiA[dataFrameCanID] : nullptr;
+                    if (leiastate != nullptr)
                     {
-                        drawText(&display, font_8x8, "RXd MAC Frame", 0, 16);
-                        display.sendBuffer();
-                        uint8_t temperature = dataFrame.data[0];
-
-                        cout << "Temperature: " << (int)temperature << endl;
-                        cout << "Counter: " << dataFrameCounter << endl;
-
-                        drawText(&display, font_8x8, ("Temp: " + to_string(temperature)).data(), 0, 24);
-                        drawText(&display, font_8x8, ("Counter: " + to_string(dataFrameCounter)).data(), 0, 32);
-                        display.sendBuffer();
-
-                        memcpy(dataHolder1, dataFrame.data, 8);
-                        memcpy(dataHolder1 + 8, dataFrame.data, 8);
-
-                        memcpy(dataHolder2, macFrame.data, 8);
-                        memcpy(dataHolder2 + 8, macFrame.data, 8);
-
-                        if (canIdToLeiA.count(dataFrameCanID) and
-                            canIdToLeiA[dataFrameCanID]->authenticate(dataHolder1, dataHolder2))
+                        if (leiastate->authenticate(dataHolder1, dataHolder2))
                         {
                             drawText(&display, font_8x8, "Authenticated", 0, 48);
+                            cout << "Authenticated" << endl;
                         }
                         else
                         {
                             drawText(&display, font_8x8, "Failed", 0, 48);
+                            cout << "Authentication Failed" << endl;
+                            shouldResync = true;
                         }
                         display.sendBuffer();
                     }
+
+                    /*
+                                        if (shouldResync)
+                                        {
+                                            cout << "-------------------------------" << endl;
+                                            cout << "Init Resync" << endl;
+                                            aecFrame.can_id = dataFrameCanID + 0b10u;
+                                            uint64_t data = dataFrameCanID << 53u | (leiastate->getEpoch() & (~(0b11111111111 << 53u)));
+                                            aecFrame.can_dlc = 8u;
+                                            for (size_t i = 7; i >= 0u; i--)
+                                            {
+                                                aecFrame.data[i] = data & 0xFF;
+                                                data >>= 0xFF;
+                                            }
+                                            if (canInterface.sendMessage(&aecFrame) == MCP2515::ERROR_OK)
+                                            {
+                                                while (canInterface.readMessage(&aecFrame) != MCP2515::ERROR_OK)
+                                                    ; // Ensure the epoch is sent
+
+                                                auto [senderAecId, senderCounter, senderCommand] = splitExtendedCanID(aecFrame.can_id);
+                                                if (senderAecId == (dataFrameCanID + 0b10u) and senderCommand == LeiACommand::EPOCH)
+                                                {
+                                                    uint64_t senderEpoch = 0u;
+                                                    for (size_t i = 7u; i >= 0u; i--)
+                                                    {
+                                                        senderEpoch = (senderEpoch << 8u) | aecFrame.data[i];
+                                                    }
+
+                                                    while (canInterface.readMessage(&aecFrame) != MCP2515::ERROR_OK)
+                                                        ; // Ensure the MAC of epoch is sent
+
+                                                    auto [macAecId, macAecCounter, macAecCommand] = splitExtendedCanID(aecFrame.can_id);
+                                                    if (macAecId == (dataFrameCanID + 0b10u) and macAecCommand == LeiACommand::MAC_OF_EPOCH)
+                                                    {
+                                                        if (leiastate->resyncOfReceiver(senderEpoch, senderCounter, aecFrame.data))
+                                                        {
+                                                            cout << "Resync Succeeded" << endl;
+                                                        }
+                                                        else
+                                                        {
+                                                            cout << "Resync Failed" << endl;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            cout << "-------------------------------" << endl;
+                                        }
+                                    */
                 }
             }
         }

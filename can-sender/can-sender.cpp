@@ -1,5 +1,6 @@
 #include <iostream>
 #include <stdint.h>
+#include <vector>
 #include "unordered_map"
 #include "pico/stdlib.h"
 #include "pico/time.h"
@@ -27,12 +28,14 @@ uint8_t
 unordered_map<uint16_t, LeiAState *>
     canIdToLeiA = {
         {0b11001100111, new LeiAState(LONG_TERM_KEY1)},
-        {0b10101010111, new LeiAState(LONG_TERM_KEY1)}};
+        {0b10101010111, new LeiAState(LONG_TERM_KEY2)}};
 
 int main()
 {
     stdio_init_all();
     const uint16_t temperatureId = 0b11001100111;
+    const uint16_t temperatureMACId = temperatureId + 0b1;
+    const uint16_t temperatureAECId = temperatureId + 0b10;
     LeiAState *leiastate = canIdToLeiA[temperatureId];
 
     MCP2515 canInterface;
@@ -54,6 +57,52 @@ int main()
 
     while (true)
     {
+        /*
+        if (canInterface.readMessage(&frame) == MCP2515::ERROR_OK and frame.can_id == temperatureAECId)
+        {
+            uint64_t data = 0u;
+            const uint16_t canIdSelectionBits = 0b11111111111u;
+            const uint64_t epochSelectionBits = ~(canIdSelectionBits << 53u);
+            for (size_t i = 0u; i < 8u; i++)
+            {
+                data = data << (i * 8u) | frame.data[i];
+            }
+
+            uint16_t dataChannelCanId = (data >> 53u) & canIdSelectionBits;
+            uint64_t receiverEpoch = data & epochSelectionBits;
+
+            if ((leiastate->getEpoch() & epochSelectionBits) != receiverEpoch)
+            {
+                cout << "-------------------------------" << endl;
+                cout << "Resync Started" << endl;
+                // Resync required
+                uint64_t senderEpoch = leiastate->getEpoch();
+                uint16_t senderCounter = leiastate->getCounter();
+                frame.can_id = getExtendedCanID(temperatureAECId, senderCounter, LeiACommand::EPOCH);
+                frame.can_dlc = 8u;
+                for (size_t i = 0u; i < 8u; i++)
+                {
+                    frame.data[i] = (senderEpoch >> (i * 8)) & 0xFF;
+                }
+
+                if (canInterface.sendMessage(&frame) == MCP2515::ERROR_OK)
+                {
+                    frame.can_id = getExtendedCanID(temperatureAECId, senderCounter, LeiACommand::MAC_OF_EPOCH);
+                    frame.can_dlc = 8u;
+                    vector<uint8_t> macOfEpoch = leiastate->resyncOfSender();
+                    for (size_t i = 0u; i < 8u; i++)
+                    {
+                        frame.data[i] = macOfEpoch[i];
+                    }
+                    if (canInterface.sendMessage(&frame) == MCP2515::ERROR_OK)
+                    {
+                        cout << "Resync from sender completed" << endl;
+                        cout << "-------------------------------" << endl;
+                    }
+                }
+            }
+        }
+*/
         reading = adc_read() * ADC_CONVERSION_FACTOR;
         temperature = 27 - (reading - 0.706) / 0.001721;
         const uint16_t currentCounter = leiastate->getCounter();
@@ -62,10 +111,9 @@ int main()
         frame.data[0] = temperature;
 
         cout << "Temperature: " << (int)temperature << endl;
-
         if (canInterface.sendMessage(&frame) == MCP2515::ERROR_OK)
         {
-            frame.can_id = getExtendedCanID(temperatureId, currentCounter, LeiACommand::MAC_OF_DATA);
+            frame.can_id = getExtendedCanID(temperatureMACId, currentCounter, LeiACommand::MAC_OF_DATA);
 
             dataHolder1[0] = dataHolder1[8] = frame.data[0];
             vector<uint8_t> macOfData = leiastate->generateMAC(dataHolder1);
@@ -73,6 +121,15 @@ int main()
             {
                 frame.data[i] = macOfData[i];
             }
+
+            cout << "MAC"
+                 << "------------------------" << endl;
+            for (size_t i = 0; i < 16U; i++)
+            {
+                cout << (int)macOfData[i] << " -> ";
+            }
+            cout << endl
+                 << "----------------------------------" << endl;
 
             frame.can_dlc = MAC_LENGTH;
             if (canInterface.sendMessage(&frame) == MCP2515::ERROR_OK)
@@ -85,6 +142,5 @@ int main()
         }
         sleep_ms(2500);
     }
-
     return 0;
 }
